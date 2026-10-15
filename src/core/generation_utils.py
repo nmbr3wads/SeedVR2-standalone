@@ -438,7 +438,8 @@ def prepare_runner(
     tile_debug: str = "false",
     attention_mode: str = 'sdpa',
     torch_compile_args_dit: Optional[Dict[str, Any]] = None,
-    torch_compile_args_vae: Optional[Dict[str, Any]] = None
+    torch_compile_args_vae: Optional[Dict[str, Any]] = None,
+    dit_arch: Optional[str] = None
 ) -> Tuple['VideoDiffusionInfer', Dict[str, Any]]:
     """
     Prepare runner with model state management and global cache integration.
@@ -465,6 +466,8 @@ def prepare_runner(
         attention_mode: Attention computation backend ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
         torch_compile_args_dit: Optional torch.compile configuration for DiT model
         torch_compile_args_vae: Optional torch.compile configuration for VAE model
+        dit_arch: Pipeline patch: "3b" / "7b" picks the DiT config explicitly; None keeps
+                  upstream's "7b"-in-path heuristic (model_configuration._create_new_runner)
         
     Returns:
         Tuple['VideoDiffusionInfer', Dict[str, Any]]: Tuple containing:
@@ -508,7 +511,8 @@ def prepare_runner(
         tile_debug=tile_debug,
         attention_mode=attention_mode,
         torch_compile_args_dit=torch_compile_args_dit,
-        torch_compile_args_vae=torch_compile_args_vae
+        torch_compile_args_vae=torch_compile_args_vae,
+        dit_arch=dit_arch
     )
 
     return runner, cache_context

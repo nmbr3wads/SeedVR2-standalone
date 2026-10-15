@@ -46,6 +46,7 @@ Model Support:
 # Standard library imports
 import sys
 import os
+import math
 import argparse
 import time
 import platform
@@ -109,7 +110,6 @@ import torch
 import cv2
 import numpy as np
 import subprocess
-import shutil
 
 # Project imports
 from src.utils.downloads import download_weight
@@ -165,7 +165,9 @@ class FFMPEGVideoWriter:
                    If False, uses x264 with yuv420p (default: False)
     
     Raises:
-        RuntimeError: If ffmpeg is not found in system PATH
+        RuntimeError: If ffmpeg cannot be resolved. The pipeline resolves it through
+            PIPELINE_FFMPEG (upscale.layout.ffmpeg); PATH is searched on dev only, never on
+            a Hub install (pipeline patch).
     
     Note:
         Frames must be passed to write() in BGR format (same as cv2.VideoWriter).
@@ -498,7 +500,17 @@ def process_single_file(input_path: str, args: argparse.Namespace, device_list: 
         if not cap.isOpened():
             raise ValueError(f"Cannot open video file: {input_path}")
         
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        # Pipeline patch (spec §3.4): a frame rate that is not finite and positive is a failed
+        # probe, never an invented 30 fps.
+        raw = cap.get(cv2.CAP_PROP_FPS)
+        try:
+            fps = float(raw)
+        except (TypeError, ValueError):
+            fps = math.nan
+        if not (math.isfinite(fps) and fps > 0):
+            cap.release()
+            raise ValueError(f"Cannot read a frame rate from {input_path} (got {raw!r}). "
+                             f"A failed probe is an error (pipeline patch, spec §3.4).")
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -965,7 +977,10 @@ def _process_frames_core(
         tile_debug=args.tile_debug.lower() if args.tile_debug else "false",
         attention_mode=args.attention_mode,
         torch_compile_args_dit=torch_compile_args_dit,
-        torch_compile_args_vae=torch_compile_args_vae
+        torch_compile_args_vae=torch_compile_args_vae,
+        # Pipeline patch: the caller's variant picks configs_3b / configs_7b; absent (standalone
+        # use), upstream's "7b"-in-path heuristic still applies.
+        dit_arch=getattr(args, "dit_arch", None)
     )
     
     ctx['cache_context'] = cache_context
@@ -1380,7 +1395,8 @@ Examples:
     io_group.add_argument("--output_format", type=str, default=None, choices=["mp4", "png", None],
                         help="Output format: 'mp4' (video) or 'png' (image sequence). Default: auto-detect from input type")
     io_group.add_argument("--video_backend", type=str, default="opencv", choices=["opencv", "ffmpeg"],
-                        help="Video encoder backend: 'opencv' (default) or 'ffmpeg' (requires ffmpeg in PATH)")
+                        help="Video encoder backend: 'opencv' (default) or 'ffmpeg' (the pipeline "
+                             "resolves ffmpeg through PIPELINE_FFMPEG; PATH on dev only)")
     io_group.add_argument("--10bit", dest="use_10bit", action="store_true",
                         help="Save 10-bit video with x265 codec (reduces banding). Without this flag, "
                          "ffmpeg uses x264 for maximum compatibility. Requires --video_backend ffmpeg")

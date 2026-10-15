@@ -631,12 +631,25 @@ def _initialize_cache_context(
     return context
 
 
+#: DiT architectures with a config folder (configs_3b / configs_7b). Pipeline patch: a caller
+#: that knows its variant passes it as dit_arch instead of relying on the path spelling.
+DIT_ARCHS = ("3b", "7b")
+
+
+def _check_dit_arch(dit_arch: Optional[str]) -> None:
+    """Pipeline patch: dit_arch is None (standalone: upstream's "7b"-in-path heuristic) or one
+    of DIT_ARCHS; anything else is an error naming the value."""
+    if dit_arch is not None and dit_arch not in DIT_ARCHS:
+        raise ValueError(f"dit_arch must be one of {', '.join(DIT_ARCHS)} or None, got {dit_arch!r}")
+
+
 def _acquire_runner(
     cache_context: Dict[str, Any],
     dit_model: str,
     vae_model: str,
     base_cache_dir: str,
-    debug: Optional['Debug'] = None
+    debug: Optional['Debug'] = None,
+    dit_arch: Optional[str] = None
 ) -> VideoDiffusionInfer:
     """
     Get or create VideoDiffusionInfer runner instance using unified caching approach.
@@ -654,6 +667,9 @@ def _acquire_runner(
         vae_model: VAE model filename for validation (e.g., "ema_vae_fp16.safetensors")
         base_cache_dir: Base directory for model files
         debug: Debug instance for logging
+        dit_arch: "3b" / "7b" picks the config for a new runner (pipeline patch); None keeps
+                  upstream's "7b"-in-path heuristic. A reused template is matched by model
+                  names only, as upstream does.
         
     Returns:
         VideoDiffusionInfer: Runner instance (cached template or newly created)
@@ -677,17 +693,18 @@ def _acquire_runner(
             return template
         else:
             # Template exists but models changed and no cached models - create new
-            return _create_new_runner(dit_model, vae_model, base_cache_dir, debug)
+            return _create_new_runner(dit_model, vae_model, base_cache_dir, debug, dit_arch=dit_arch)
     else:
         # No template - create new runner
-        return _create_new_runner(dit_model, vae_model, base_cache_dir, debug)
+        return _create_new_runner(dit_model, vae_model, base_cache_dir, debug, dit_arch=dit_arch)
 
 
 def _create_new_runner(
     dit_model: str,
     vae_model: str,
     base_cache_dir: str,
-    debug: Optional['Debug'] = None
+    debug: Optional['Debug'] = None,
+    dit_arch: Optional[str] = None
 ) -> VideoDiffusionInfer:
     """
     Create a new VideoDiffusionInfer runner instance from scratch.
@@ -697,12 +714,16 @@ def _create_new_runner(
     runner template is available or when model selection changes.
     
     Args:
-        dit_model: DiT model filename (determines config selection)
+        dit_model: DiT model filename (determines config selection when dit_arch is None)
                   - Contains "7b" → loads configs_7b/main.yaml
                   - Otherwise → loads configs_3b/main.yaml
         vae_model: VAE model filename (stored for reference, not used in config selection)
         base_cache_dir: Base directory for model files (not used directly but passed for context)
         debug: Debug instance for logging and timing
+        dit_arch: Pipeline patch. "3b" / "7b" picks configs_3b / configs_7b whatever the path
+                  says (an absolute path's folders, e.g. a hash-named or UNC install root, may
+                  contain "7b"; a 7B file may be named model.fp8.safetensors). None keeps the
+                  heuristic above for standalone callers. Anything else is a ValueError.
         
     Returns:
         VideoDiffusionInfer: Newly created runner with:
@@ -711,12 +732,15 @@ def _create_new_runner(
             - Config set to mutable (readonly=False)
             - No models loaded (structure only)
     """
-    debug.log(f"Creating new runner: DiT={dit_model}, VAE={vae_model}", 
+    _check_dit_arch(dit_arch)
+    arch = dit_arch if dit_arch is not None else ("7b" if "7b" in dit_model else "3b")
+    debug.log(f"Creating new runner: DiT={dit_model}, VAE={vae_model}, arch={arch}"
+              f"{'' if dit_arch is not None else ' (from the DiT path)'}",
              category="runner", force=True)
     
     debug.start_timer("config_load")
     config_path = os.path.join(script_directory, 
-                              './configs_7b' if "7b" in dit_model else './configs_3b', 
+                              './configs_7b' if arch == "7b" else './configs_3b',
                               'main.yaml')
     config = load_config(config_path)
     debug.end_timer("config_load", "Config loading")
@@ -749,7 +773,8 @@ def configure_runner(
     tile_debug: str = "false",
     attention_mode: str = 'sdpa',
     torch_compile_args_dit: Optional[Dict[str, Any]] = None,
-    torch_compile_args_vae: Optional[Dict[str, Any]] = None
+    torch_compile_args_vae: Optional[Dict[str, Any]] = None,
+    dit_arch: Optional[str] = None
 ) -> Tuple[VideoDiffusionInfer, Dict[str, Any]]:
     """
     Configure VideoDiffusionInfer runner with model loading and settings.
@@ -777,6 +802,8 @@ def configure_runner(
         attention_mode: Attention computation backend ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
         torch_compile_args_dit: Optional torch.compile configuration for DiT model
         torch_compile_args_vae: Optional torch.compile configuration for VAE model
+        dit_arch: Pipeline patch: "3b" / "7b" picks the DiT config explicitly; None keeps
+                  upstream's "7b"-in-path heuristic (see _create_new_runner)
         
     Returns:
         Tuple[VideoDiffusionInfer, Dict[str, Any]]: (configured runner, cache context dict)
@@ -794,6 +821,7 @@ def configure_runner(
     
     if debug is None:
         raise ValueError("Debug instance must be provided to configure_runner")
+    _check_dit_arch(dit_arch)    # pipeline patch: a bad value fails before any cache work
     
     # Validate BlockSwap configuration early (before any model loading)
     block_swap_config = validate_blockswap_config(
@@ -812,7 +840,7 @@ def configure_runner(
     # Phase 2: Get or create runner
     runner = _acquire_runner(
         cache_context, dit_model, vae_model, 
-        base_cache_dir, debug
+        base_cache_dir, debug, dit_arch=dit_arch
     )
     
     # Phase 3: Configure runner settings
