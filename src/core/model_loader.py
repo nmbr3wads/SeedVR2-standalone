@@ -815,11 +815,34 @@ def initialize_meta_buffers_impl(model: torch.nn.Module, target_device: torch.de
     return initialized_count
 
 
-def _load_standard_weights(model: torch.nn.Module, state: Dict[str, torch.Tensor], 
+def _load_standard_weights(model: torch.nn.Module, state: Dict[str, torch.Tensor],
                           used_meta: bool, model_type: str, model_type_lower: str,
                           debug: Optional['Debug'] = None) -> torch.nn.Module:
     """Load standard (non-GGUF) weights into model."""
     debug.start_timer(f"{model_type_lower}_state_apply")
+    # Scaled fp8 weight-only cache (pipeline winshim recipe): a ``<path>.weight_scale``
+    # key means the matching ``<path>.weight`` is per-tensor-scaled fp8. Swap those
+    # nn.Linear modules to Fp8WeightOnlyLinear BEFORE the assign-load so the fp8 weight and
+    # its f32 scale land in matching params (mirrors the GGUF replace_linear_with_quantized
+    # path). Plain tensors -> block-swap ``.to()`` moves still work. No-op for bf16/naive-fp8
+    # checkpoints (no scale keys). Lazy import so the upstream fork stays importable without
+    # the ``upscale`` package on hand.
+    scale_keys = {k for k in state if k.endswith(".weight_scale")}
+    if scale_keys:
+        try:
+            from upscale.fp8_weight_only import swap_linears_by_cache_keys
+        except ImportError as e:
+            raise ImportError(
+                "checkpoint carries .weight_scale keys (scaled fp8) but upscale.fp8_weight_only "
+                f"is unavailable to swap the Linear layers: {e}")
+        n = swap_linears_by_cache_keys(model, scale_keys)
+        if n == 0:
+            raise RuntimeError(
+                f"scaled fp8: {len(scale_keys)} .weight_scale keys present but 0 Linear layers "
+                "were swapped -- the per-tensor scales would be silently ignored (wrong output). "
+                "Check the cache keys match the model's Linear module paths.")
+        debug.log(f"Scaled fp8: swapped {n}/{len(scale_keys)} Linear -> Fp8WeightOnlyLinear",
+                  category=model_type_lower, force=True)
     model.load_state_dict(state, strict=False, assign=True)
     
     action = "materialized" if used_meta else "applied"

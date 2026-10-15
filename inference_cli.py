@@ -164,13 +164,31 @@ class FFMPEGVideoWriter:
     """
     
     def __init__(self, path: str, width: int, height: int, fps: float, use_10bit: bool = False):
-        pix_fmt = 'yuv420p10le' if use_10bit else 'yuv420p'
-        codec = 'libx265' if use_10bit else 'libx264'
-        
+        # Integration hook (upscale tool): codec / crf are chosen via env so our
+        # `run_video` can offer ProRes + a quality dial without threading new args
+        # through process_single_file. No env set -> byte-identical prior behavior
+        # (10-bit x265 / 8-bit x264, crf 12).
+        import os as _os
+        codec_sel = _os.environ.get('SEEDVR2_VIDEO_CODEC', '').strip().lower()
+        crf = _os.environ.get('SEEDVR2_VIDEO_CRF', '12').strip() or '12'
+        if codec_sel in ('prores', 'prores_ks'):
+            # Apple ProRes 422 HQ, 10-bit — near-lossless, no macroblock / gradient
+            # banding (crf does not apply to ProRes; profile 3 = HQ).
+            vargs = ['-c:v', 'prores_ks', '-profile:v', '3', '-pix_fmt', 'yuv422p10le']
+        elif codec_sel in ('h265', 'hevc', 'libx265'):
+            pix_fmt = 'yuv420p10le' if use_10bit else 'yuv420p'
+            vargs = ['-c:v', 'libx265', '-pix_fmt', pix_fmt, '-preset', 'medium', '-crf', crf]
+        elif codec_sel in ('h264', 'avc', 'libx264'):
+            vargs = ['-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'medium', '-crf', crf]
+        else:
+            codec = 'libx265' if use_10bit else 'libx264'
+            pix_fmt = 'yuv420p10le' if use_10bit else 'yuv420p'
+            vargs = ['-c:v', codec, '-pix_fmt', pix_fmt, '-preset', 'medium', '-crf', crf]
+
         self.proc = subprocess.Popen(
             ['ffmpeg', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24',
              '-s', f'{width}x{height}', '-r', str(fps), '-i', '-',
-             '-c:v', codec, '-pix_fmt', pix_fmt, '-preset', 'medium', '-crf', '12', path],
+             *vargs, path],
             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
     
