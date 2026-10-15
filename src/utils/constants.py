@@ -118,6 +118,12 @@ def find_model_file(filename: str, fallback_dir: Optional[str] = None) -> str:
     Returns:
         str: Full path to the model file
     """
+    # Pipeline patch (spec §6.5, V13): an absolute path is the caller's resolved file. Return
+    # it before discovery, so a same-named file under a registered folder (cwd-relative
+    # ./models/SEEDVR2 included) can never shadow it.
+    if os.path.isabs(filename):
+        return filename
+
     # Get all model files
     model_files = get_all_model_files()
     

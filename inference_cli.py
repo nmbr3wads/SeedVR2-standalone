@@ -60,7 +60,7 @@ if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
 
 # Set environment variable so all spawned processes can find modules
-os.environ['PYTHONPATH'] = script_dir + ':' + os.environ.get('PYTHONPATH', '')
+os.environ['PYTHONPATH'] = script_dir + os.pathsep + os.environ.get('PYTHONPATH', '')
 
 # Ensure safe CUDA usage with multiprocessing
 if mp.get_start_method(allow_none=True) != 'spawn':
@@ -139,6 +139,15 @@ debug = Debug(enabled=False)  # Will be enabled via --debug CLI flag
 # FFMPEG Class
 # =============================================================================
 
+def _pipeline_ffmpeg() -> str:
+    """The ffmpeg the pipeline pinned (spec §3.4, V12): the upscale layout's resolver, so the
+    clone follows the one binary rule (PIPELINE_FFMPEG naming a file; PATH only on dev; a Hub
+    install never searches PATH). The clone runs only inside the upscale tool, where `upscale`
+    is importable (Plan A2-4, A2-05)."""
+    from upscale import layout
+    return layout.ffmpeg()
+
+
 class FFMPEGVideoWriter:
     """
     Video writer using ffmpeg subprocess for encoding with 10-bit support.
@@ -186,10 +195,11 @@ class FFMPEGVideoWriter:
             vargs = ['-c:v', codec, '-pix_fmt', pix_fmt, '-preset', 'medium', '-crf', crf]
 
         self.proc = subprocess.Popen(
-            ['ffmpeg', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24',
+            [_pipeline_ffmpeg(), '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24',
              '-s', f'{width}x{height}', '-r', str(fps), '-i', '-',
              *vargs, path],
-            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
         )
     
     def write(self, frame_bgr: np.ndarray):
@@ -933,7 +943,7 @@ def _process_frames_core(
     
     runner, cache_context = prepare_runner(
         dit_model=args.dit_model,
-        vae_model=DEFAULT_VAE,
+        vae_model=getattr(args, "vae_model", None) or DEFAULT_VAE,
         model_dir=model_dir,
         debug=debug,
         ctx=ctx,
@@ -1550,11 +1560,14 @@ def main() -> None:
         debug.log(f"VAE decode tile overlap ({args.vae_decode_tile_overlap}) must be smaller than tile size ({args.vae_decode_tile_size})", level="ERROR", category="vae", force=True)
         sys.exit(1)
     
-    # Validate ffmpeg availability if selected
-    if args.video_backend == "ffmpeg" and shutil.which("ffmpeg") is None:
-        debug.log("--video_backend ffmpeg requires ffmpeg in PATH. Install ffmpeg or use --video_backend opencv", 
-                 level="ERROR", category="setup", force=True)
-        sys.exit(1)
+    # Validate ffmpeg availability if selected (pipeline patch, B-19): the writer's resolution,
+    # so a set PIPELINE_FFMPEG satisfies it and a Hub install never demands PATH.
+    if args.video_backend == "ffmpeg":
+        try:
+            _pipeline_ffmpeg()
+        except RuntimeError as e:  # layout.LayoutError is a RuntimeError
+            debug.log(f"--video_backend ffmpeg: {e}", level="ERROR", category="setup", force=True)
+            sys.exit(1)
     
     # Inform about caching defaults
     if args.cache_dit and args.dit_offload_device == "none":
